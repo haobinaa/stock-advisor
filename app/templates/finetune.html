@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}模型微调 - Kronos Stock Advisor{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>模型微调</h1>
+    <p class="page-desc">使用最新数据和 hard examples 增量微调 Kronos 模型</p>
+</div>
+
+<!-- Status -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">训练数据</div>
+        <div class="stat-value" id="stat-data">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">微调状态</div>
+        <div class="stat-value" id="stat-status">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">微调模型</div>
+        <div class="stat-value" id="stat-model" style="font-size:12px">-</div>
+    </div>
+</div>
+
+<!-- Actions -->
+<div class="card">
+    <h2>微调流程</h2>
+    <div class="finetune-steps">
+        <div class="step">
+            <h3>步骤 1: 准备训练数据</h3>
+            <p>从沪深300成分股获取最近6个月数据，加入回测偏差最大的 hard examples</p>
+            <button id="prepare-btn" class="btn btn-primary">准备数据</button>
+            <div id="prepare-result" class="step-result"></div>
+        </div>
+        <div class="step">
+            <h3>步骤 2: 启动微调</h3>
+            <p>使用 finetune_csv 管道训练 Tokenizer 和 Predictor（需要 GPU）</p>
+            <button id="start-btn" class="btn btn-primary" disabled>开始微调</button>
+            <div id="train-result" class="step-result"></div>
+        </div>
+        <div class="step">
+            <h3>步骤 3: 切换模型</h3>
+            <p>将当前预测模型切换为微调后的版本</p>
+            <button id="switch-btn" class="btn btn-secondary" disabled>切换到微调模型</button>
+            <div id="switch-result" class="step-result"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Progress -->
+<div id="progress-section" class="card hidden">
+    <h2>训练进度</h2>
+    <div class="progress-container">
+        <div class="progress-bar">
+            <div id="train-progress" class="progress-fill"></div>
+        </div>
+        <span id="train-progress-text">-</span>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let pollTimer = null;
+
+async function loadStatus() {
+    try {
+        const resp = await fetch('/api/finetune/status');
+        const s = await resp.json();
+
+        document.getElementById('stat-data').textContent =
+            s.data_ready ? `${s.data_rows || '?'} 行` : '未准备';
+        document.getElementById('stat-status').textContent =
+            s.status?.state || 'idle';
+        document.getElementById('stat-model').textContent =
+            s.finetuned_model ? '可用' : '无';
+
+        // Enable buttons based on state
+        document.getElementById('start-btn').disabled = !s.data_ready;
+        document.getElementById('switch-btn').disabled = !s.finetuned_model;
+
+        if (s.status?.state === 'running') {
+            startPolling();
+        }
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+document.getElementById('prepare-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('prepare-btn');
+    btn.disabled = true; btn.textContent = '准备中...';
+    try {
+        const resp = await fetch('/api/finetune/prepare', {method: 'POST'});
+        const data = await resp.json();
+        if (data.error) {
+            document.getElementById('prepare-result').innerHTML =
+                `<span class="error">${data.error}</span>`;
+        } else {
+            document.getElementById('prepare-result').innerHTML =
+                `<span style="color:#4CAF50">数据已准备: ${data.total_rows} 行, ${data.symbols} 只股票, ${data.hard_examples} 个 hard examples</span>`;
+            document.getElementById('start-btn').disabled = false;
+        }
+    } catch (e) {
+        document.getElementById('prepare-result').innerHTML = `<span class="error">失败</span>`;
+    }
+    btn.disabled = false; btn.textContent = '准备数据';
+});
+
+document.getElementById('start-btn').addEventListener('click', async () => {
+    if (!confirm('启动微调？这需要 GPU 并可能持续较长时间。')) return;
+    const btn = document.getElementById('start-btn');
+    btn.disabled = true; btn.textContent = '启动中...';
+    try {
+        await fetch('/api/finetune/start', {method: 'POST'});
+        startPolling();
+    } catch (e) {
+        alert('启动失败');
+        btn.disabled = false; btn.textContent = '开始微调';
+    }
+});
+
+document.getElementById('switch-btn').addEventListener('click', async () => {
+    if (!confirm('切换到微调后的模型？')) return;
+    try {
+        const resp = await fetch('/api/finetune/switch', {method: 'POST'});
+        const data = await resp.json();
+        if (data.error) {
+            document.getElementById('switch-result').innerHTML = `<span class="error">${data.error}</span>`;
+        } else {
+            document.getElementById('switch-result').innerHTML =
+                `<span style="color:#4CAF50">已切换: ${data.model_path}</span>`;
+        }
+    } catch (e) {
+        document.getElementById('switch-result').innerHTML = `<span class="error">切换失败</span>`;
+    }
+});
+
+function startPolling() {
+    document.getElementById('progress-section').classList.remove('hidden');
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/finetune/status');
+            const s = await resp.json();
+            const st = s.status || {};
+            document.getElementById('train-progress').style.width = (st.progress || 0) + '%';
+            document.getElementById('train-progress-text').textContent = st.message || st.state;
+            document.getElementById('stat-status').textContent = st.state;
+
+            if (st.state === 'completed' || st.state === 'error') {
+                clearInterval(pollTimer);
+                if (st.state === 'completed') {
+                    document.getElementById('train-result').innerHTML =
+                        '<span style="color:#4CAF50">微调完成!</span>';
+                    document.getElementById('switch-btn').disabled = false;
+                } else {
+                    document.getElementById('train-result').innerHTML =
+                        `<span class="error">${st.message}</span>`;
+                }
+                document.getElementById('start-btn').disabled = false;
+                document.getElementById('start-btn').textContent = '开始微调';
+            }
+        } catch (e) {}
+    }, 5000);
+}
+
+loadStatus();
+</script>
+{% endblock %}

@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}回测验证 - Kronos Stock Advisor{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>回测验证</h1>
+    <p class="page-desc">追踪预测准确性，持续优化评分模型</p>
+</div>
+
+<!-- Stats cards -->
+<div id="stats-cards" class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-label">总预测数</div>
+        <div class="stat-value" id="stat-total">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">已回测</div>
+        <div class="stat-value" id="stat-backtested">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">方向准确率</div>
+        <div class="stat-value" id="stat-accuracy">-</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-label">平均收益偏差</div>
+        <div class="stat-value" id="stat-error">-</div>
+    </div>
+</div>
+
+<!-- Actions -->
+<div class="toolbar">
+    <button id="run-backtest-btn" class="btn btn-primary">运行待回测</button>
+    <button id="optimize-weights-btn" class="btn btn-secondary">优化权重</button>
+</div>
+
+<!-- Weight optimization panel -->
+<div id="weight-panel" class="card hidden">
+    <h2>权重优化结果</h2>
+    <div id="weight-content"></div>
+</div>
+
+<!-- By recommendation -->
+<div class="card">
+    <h2>按推荐等级表现</h2>
+    <table class="data-table" id="rec-table">
+        <thead>
+            <tr><th>推荐等级</th><th>数量</th><th>平均实际收益</th><th>方向准确率</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<!-- By industry -->
+<div class="card">
+    <h2>按行业准确率</h2>
+    <table class="data-table" id="industry-table">
+        <thead>
+            <tr><th>行业</th><th>数量</th><th>方向准确率</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<!-- Recent predictions -->
+<div class="card">
+    <h2>最近预测记录</h2>
+    <table class="data-table" id="records-table">
+        <thead>
+            <tr><th>日期</th><th>股票</th><th>预测收益</th><th>实际收益</th><th>方向</th><th>评分</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadStats() {
+    try {
+        const resp = await fetch('/api/backtest/stats');
+        const s = await resp.json();
+
+        document.getElementById('stat-total').textContent = s.total_predictions || 0;
+        document.getElementById('stat-backtested').textContent = s.backtested_count || 0;
+        document.getElementById('stat-accuracy').textContent =
+            s.direction_accuracy != null ? (s.direction_accuracy * 100).toFixed(1) + '%' : '-';
+        document.getElementById('stat-error').textContent =
+            s.avg_return_error != null ? s.avg_return_error.toFixed(2) + '%' : '-';
+
+        // By recommendation
+        const recMap = {strong_buy:'强烈买入', buy:'买入', hold:'持有', avoid:'回避'};
+        const recBody = document.querySelector('#rec-table tbody');
+        if (s.by_recommendation) {
+            recBody.innerHTML = Object.entries(s.by_recommendation).map(([k, v]) =>
+                `<tr><td>${recMap[k]||k}</td><td>${v.count}</td>
+                <td class="${(v.avg_actual_return||0)>=0?'positive':'negative'}">${(v.avg_actual_return||0).toFixed(2)}%</td>
+                <td>${((v.direction_accuracy||0)*100).toFixed(1)}%</td></tr>`
+            ).join('');
+        }
+
+        // By industry
+        const indBody = document.querySelector('#industry-table tbody');
+        if (s.by_industry) {
+            const sorted = Object.entries(s.by_industry).sort((a,b) => (b[1].direction_accuracy||0) - (a[1].direction_accuracy||0));
+            indBody.innerHTML = sorted.slice(0, 20).map(([k, v]) =>
+                `<tr><td>${k||'-'}</td><td>${v.count}</td>
+                <td>${((v.direction_accuracy||0)*100).toFixed(1)}%</td></tr>`
+            ).join('');
+        }
+    } catch (e) {
+        console.error('Stats load error:', e);
+    }
+}
+
+async function loadRecords() {
+    try {
+        const resp = await fetch('/api/backtest/records?limit=30');
+        const records = await resp.json();
+        const tbody = document.querySelector('#records-table tbody');
+        tbody.innerHTML = records.map(r => {
+            const bt = r.backtest;
+            return `<tr>
+                <td>${r.predicted_at}</td>
+                <td><a href="/detail/${r.symbol}">${r.name||r.symbol}</a></td>
+                <td class="${r.expected_return>=0?'positive':'negative'}">${r.expected_return>=0?'+':''}${r.expected_return.toFixed(1)}%</td>
+                <td>${bt ? `<span class="${bt.actual_return>=0?'positive':'negative'}">${bt.actual_return>=0?'+':''}${bt.actual_return.toFixed(1)}%</span>` : '<span style="color:#999">待回测</span>'}</td>
+                <td>${bt ? (bt.direction_correct ? '✓' : '✗') : '-'}</td>
+                <td>★${r.score.toFixed(0)}</td>
+            </tr>`;
+        }).join('');
+    } catch (e) {
+        console.error('Records load error:', e);
+    }
+}
+
+document.getElementById('run-backtest-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('run-backtest-btn');
+    btn.disabled = true; btn.textContent = '回测中...';
+    try {
+        const resp = await fetch('/api/backtest/run', {method:'POST'});
+        const data = await resp.json();
+        alert(`完成 ${data.backtested || 0} 条回测`);
+        loadStats(); loadRecords();
+    } catch (e) { alert('回测失败'); }
+    btn.disabled = false; btn.textContent = '运行待回测';
+});
+
+document.getElementById('optimize-weights-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('optimize-weights-btn');
+    btn.disabled = true; btn.textContent = '优化中...';
+    try {
+        const resp = await fetch('/api/weights/optimize', {method:'POST'});
+        const data = await resp.json();
+        if (data.error) { alert(data.error); return; }
+
+        const panel = document.getElementById('weight-panel');
+        panel.classList.remove('hidden');
+        const dimNames = {expected_return:'预期收益',max_drawdown:'最大回撤',uncertainty:'确定性',technical:'技术面',fund_flow:'资金面',margin:'融资趋势'};
+        let html = '<table class="data-table"><thead><tr><th>维度</th><th>旧权重</th><th>新权重</th><th>变化</th></tr></thead><tbody>';
+        for (const [k, v] of Object.entries(data.new_weights)) {
+            const old = data.old_weights[k] || 0;
+            const diff = v - old;
+            html += `<tr><td>${dimNames[k]||k}</td><td>${(old*100).toFixed(1)}%</td><td>${(v*100).toFixed(1)}%</td>
+                <td class="${diff>=0?'positive':'negative'}">${diff>=0?'+':''}${(diff*100).toFixed(1)}%</td></tr>`;
+        }
+        html += '</tbody></table>';
+        if (data.evaluation) {
+            html += `<p style="margin-top:12px">改进: Top 20% 股票平均收益 ${data.evaluation.old_top_return?.toFixed(2)||'?'}% → ${data.evaluation.new_top_return?.toFixed(2)||'?'}%</p>`;
+        }
+        html += '<p style="color:#4CAF50;margin-top:8px">新权重已保存并生效</p>';
+        document.getElementById('weight-content').innerHTML = html;
+    } catch (e) { alert('优化失败: ' + e.message); }
+    btn.disabled = false; btn.textContent = '优化权重';
+});
+
+loadStats();
+loadRecords();
+</script>
+{% endblock %}

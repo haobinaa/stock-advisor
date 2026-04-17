@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block title %}自选股 - Kronos Stock Advisor{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>自选股</h1>
+    <div class="search-bar">
+        <input type="text" id="search-input" placeholder="输入股票代码或名称..." autocomplete="off">
+        <button id="search-btn" class="btn btn-primary">搜索</button>
+    </div>
+    <div id="search-results" class="search-dropdown hidden"></div>
+</div>
+
+<div class="toolbar">
+    <span class="toolbar-label">排序:</span>
+    <button class="btn btn-sm sort-btn active" data-sort="score">综合评分</button>
+    <button class="btn btn-sm sort-btn" data-sort="expected_return">预期收益</button>
+    <button class="btn btn-sm sort-btn" data-sort="risk_level">风险等级</button>
+    <button id="refresh-all-btn" class="btn btn-sm btn-secondary" style="margin-left:auto">刷新全部分析</button>
+</div>
+
+<div id="watchlist-container">
+    <div id="loading-indicator" class="loading hidden">
+        <div class="spinner"></div>
+        <span>正在分析...</span>
+    </div>
+    <div id="stock-list" class="stock-list"></div>
+    <div id="empty-state" class="empty-state hidden">
+        <p>暂无自选股，搜索并添加股票开始分析</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const searchInput = document.getElementById('search-input');
+const searchBtn = document.getElementById('search-btn');
+const searchResults = document.getElementById('search-results');
+const stockList = document.getElementById('stock-list');
+const emptyState = document.getElementById('empty-state');
+const loadingIndicator = document.getElementById('loading-indicator');
+const refreshAllBtn = document.getElementById('refresh-all-btn');
+
+let watchlistData = [];
+let analysisCache = {};
+let currentSort = 'score';
+
+// Search
+searchBtn.addEventListener('click', doSearch);
+searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+searchInput.addEventListener('input', () => {
+    if (!searchInput.value.trim()) searchResults.classList.add('hidden');
+});
+
+async function doSearch() {
+    const q = searchInput.value.trim();
+    if (!q) return;
+    searchResults.innerHTML = '<div class="search-item">搜索中...</div>';
+    searchResults.classList.remove('hidden');
+    try {
+        const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const data = await resp.json();
+        if (!data.length) {
+            searchResults.innerHTML = '<div class="search-item">未找到结果</div>';
+            return;
+        }
+        searchResults.innerHTML = data.slice(0, 10).map(s =>
+            `<div class="search-item" onclick="addStock('${s.symbol}', '${s.name}')">
+                <span class="search-code">${s.symbol}</span>
+                <span class="search-name">${s.name}</span>
+                <span class="search-price">${s.price || ''}</span>
+            </div>`
+        ).join('');
+    } catch (e) {
+        searchResults.innerHTML = '<div class="search-item">搜索失败</div>';
+    }
+}
+
+async function addStock(symbol, name) {
+    searchResults.classList.add('hidden');
+    searchInput.value = '';
+    try {
+        const resp = await fetch('/api/watchlist', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({symbol})
+        });
+        if (resp.ok) {
+            loadWatchlist();
+        } else {
+            const err = await resp.json();
+            if (err.error === 'already in watchlist') alert('已在自选股中');
+        }
+    } catch (e) {
+        alert('添加失败');
+    }
+}
+
+async function removeStock(symbol) {
+    if (!confirm(`确定删除 ${symbol}？`)) return;
+    await fetch(`/api/watchlist/${symbol}`, {method: 'DELETE'});
+    delete analysisCache[symbol];
+    loadWatchlist();
+}
+
+async function loadWatchlist() {
+    const resp = await fetch('/api/watchlist');
+    watchlistData = await resp.json();
+    if (!watchlistData.length) {
+        stockList.innerHTML = '';
+        emptyState.classList.remove('hidden');
+        return;
+    }
+    emptyState.classList.add('hidden');
+    renderList();
+    analyzeAll();
+}
+
+async function analyzeAll() {
+    loadingIndicator.classList.remove('hidden');
+    const symbols = watchlistData.map(w => w.symbol).filter(s => !analysisCache[s]);
+    for (const sym of symbols) {
+        try {
+            const resp = await fetch(`/api/analyze/${sym}`);
+            if (resp.ok) {
+                analysisCache[sym] = await resp.json();
+                renderList();
+            }
+        } catch (e) {
+            console.error(`Analysis failed for ${sym}:`, e);
+        }
+    }
+    loadingIndicator.classList.add('hidden');
+}
+
+function renderList() {
+    let items = watchlistData.map(w => ({
+        ...w,
+        analysis: analysisCache[w.symbol] || null
+    }));
+
+    // Sort
+    items.sort((a, b) => {
+        if (!a.analysis && !b.analysis) return 0;
+        if (!a.analysis) return 1;
+        if (!b.analysis) return -1;
+        if (currentSort === 'score') return b.analysis.score - a.analysis.score;
+        if (currentSort === 'expected_return') return b.analysis.expected_return - a.analysis.expected_return;
+        if (currentSort === 'risk_level') {
+            const riskOrder = {low: 0, medium: 1, high: 2};
+            return (riskOrder[a.analysis.risk_level] || 1) - (riskOrder[b.analysis.risk_level] || 1);
+        }
+        return 0;
+    });
+
+    stockList.innerHTML = items.map(item => {
+        const a = item.analysis;
+        if (!a) {
+            return `<div class="stock-card loading-card">
+                <div class="stock-header">
+                    <span class="stock-code">${item.symbol}</span>
+                    <span class="stock-name">${item.name}</span>
+                    <span class="analyzing">分析中...</span>
+                </div>
+            </div>`;
+        }
+        const recMap = {strong_buy:'强烈买入', buy:'买入', hold:'持有观望', avoid:'建议回避'};
+        const riskMap = {low:'低风险', medium:'中风险', high:'高风险'};
+        const riskClass = {low:'risk-low', medium:'risk-medium', high:'risk-high'};
+        const recClass = {strong_buy:'rec-strong-buy', buy:'rec-buy', hold:'rec-hold', avoid:'rec-avoid'};
+
+        let signals = [];
+        if (a.technical && a.technical.ma_alignment === 'bullish') signals.push('均线多头');
+        if (a.technical && a.technical.ma_alignment === 'bearish') signals.push('均线空头');
+        if (a.fund_flow && a.fund_flow.main_net_inflow_5d > 0) signals.push('主力净流入');
+        if (a.fund_flow && a.fund_flow.main_net_inflow_5d < 0) signals.push('资金流出');
+        if (a.margin && a.margin.margin_balance_trend > 0) signals.push('融资增长');
+
+        return `<div class="stock-card" onclick="location.href='/detail/${item.symbol}'">
+            <div class="stock-header">
+                <span class="stock-code">${item.symbol}</span>
+                <span class="stock-name">${a.name}</span>
+                <span class="stock-industry">${a.industry || ''}</span>
+                <span class="stock-price">${a.current_price.toFixed(2)}</span>
+                <span class="stock-return ${a.expected_return >= 0 ? 'positive' : 'negative'}">
+                    ${a.expected_return >= 0 ? '+' : ''}${a.expected_return.toFixed(1)}%
+                </span>
+                <span class="stock-score">★${a.score.toFixed(0)}</span>
+                <button class="btn-delete" onclick="event.stopPropagation(); removeStock('${item.symbol}')" title="删除">×</button>
+            </div>
+            <div class="stock-tags">
+                <span class="tag ${riskClass[a.risk_level]}">${riskMap[a.risk_level]}</span>
+                <span class="tag ${recClass[a.recommendation]}">${recMap[a.recommendation]}</span>
+                ${signals.map(s => `<span class="tag tag-signal">${s}</span>`).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// Sort buttons
+document.querySelectorAll('.sort-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelector('.sort-btn.active').classList.remove('active');
+        btn.classList.add('active');
+        currentSort = btn.dataset.sort;
+        renderList();
+    });
+});
+
+// Refresh all
+refreshAllBtn.addEventListener('click', () => {
+    analysisCache = {};
+    analyzeAll();
+});
+
+// Hide search dropdown on click outside
+document.addEventListener('click', e => {
+    if (!e.target.closest('.search-bar') && !e.target.closest('.search-dropdown')) {
+        searchResults.classList.add('hidden');
+    }
+});
+
+// Init
+loadWatchlist();
+</script>
+{% endblock %}

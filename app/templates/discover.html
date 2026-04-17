@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}发现 - Kronos Stock Advisor{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>发现值得买入的股票</h1>
+    <p class="page-desc">扫描沪深300 + 中证500成分股，发现高回报且风险可控的标的</p>
+</div>
+
+<div class="toolbar">
+    <button id="scan-btn" class="btn btn-primary">开始扫描</button>
+    <div id="progress-bar-container" class="progress-container hidden">
+        <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <span id="progress-text">0/0</span>
+    </div>
+    <div class="filters" style="margin-left:auto">
+        <label>风险:
+            <select id="filter-risk">
+                <option value="all">全部</option>
+                <option value="low">低风险</option>
+                <option value="medium">中风险</option>
+            </select>
+        </label>
+        <label>收益率:
+            <select id="filter-return">
+                <option value="0">&gt;0%</option>
+                <option value="5" selected>&gt;5%</option>
+                <option value="10">&gt;10%</option>
+                <option value="15">&gt;15%</option>
+            </select>
+        </label>
+    </div>
+</div>
+
+<div id="scan-results" class="stock-list">
+    <div id="scan-empty" class="empty-state">
+        <p>点击"开始扫描"分析约 800 只成分股</p>
+        <p class="hint">扫描包含 Kronos 预测 + 技术面分析，耗时较长</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const scanBtn = document.getElementById('scan-btn');
+const progressContainer = document.getElementById('progress-bar-container');
+const progressFill = document.getElementById('progress-fill');
+const progressText = document.getElementById('progress-text');
+const scanResults = document.getElementById('scan-results');
+const scanEmpty = document.getElementById('scan-empty');
+const filterRisk = document.getElementById('filter-risk');
+const filterReturn = document.getElementById('filter-return');
+
+let allResults = [];
+let pollTimer = null;
+
+scanBtn.addEventListener('click', startScan);
+filterRisk.addEventListener('change', renderResults);
+filterReturn.addEventListener('change', renderResults);
+
+async function startScan() {
+    scanBtn.disabled = true;
+    scanBtn.textContent = '扫描中...';
+    progressContainer.classList.remove('hidden');
+    scanEmpty.classList.add('hidden');
+
+    try {
+        const resp = await fetch('/api/scan/start', {method: 'POST'});
+        const data = await resp.json();
+        if (data.status === 'cached') {
+            loadResults();
+            return;
+        }
+        pollProgress();
+    } catch (e) {
+        alert('启动扫描失败');
+        resetScanBtn();
+    }
+}
+
+function pollProgress() {
+    pollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/scan/progress');
+            const data = await resp.json();
+            const pct = data.total > 0 ? (data.completed / data.total * 100) : 0;
+            progressFill.style.width = pct + '%';
+            progressText.textContent = `${data.completed}/${data.total} (${data.status})`;
+
+            if (data.status === 'completed' || data.status.startsWith('error')) {
+                clearInterval(pollTimer);
+                if (data.status === 'completed') {
+                    loadResults();
+                } else {
+                    alert('扫描出错: ' + data.status);
+                    resetScanBtn();
+                }
+            }
+        } catch (e) {
+            // continue polling
+        }
+    }, 2000);
+}
+
+async function loadResults() {
+    try {
+        const resp = await fetch('/api/scan/results');
+        const data = await resp.json();
+        allResults = data.results || [];
+        renderResults();
+        resetScanBtn();
+        progressContainer.classList.add('hidden');
+    } catch (e) {
+        alert('获取结果失败');
+        resetScanBtn();
+    }
+}
+
+function resetScanBtn() {
+    scanBtn.disabled = false;
+    scanBtn.textContent = '开始扫描';
+}
+
+function renderResults() {
+    const riskFilter = filterRisk.value;
+    const returnFilter = parseFloat(filterReturn.value);
+
+    let filtered = allResults.filter(r => {
+        if (riskFilter !== 'all' && r.risk_level !== riskFilter) return false;
+        if (r.expected_return < returnFilter) return false;
+        return true;
+    });
+
+    if (!filtered.length) {
+        scanResults.innerHTML = '<div class="empty-state"><p>暂无符合条件的推荐</p></div>';
+        return;
+    }
+
+    const recMap = {strong_buy:'强烈买入', buy:'买入', hold:'持有观望', avoid:'建议回避'};
+    const riskMap = {low:'低风险', medium:'中风险', high:'高风险'};
+    const riskClass = {low:'risk-low', medium:'risk-medium', high:'risk-high'};
+    const recClass = {strong_buy:'rec-strong-buy', buy:'rec-buy', hold:'rec-hold', avoid:'rec-avoid'};
+
+    scanResults.innerHTML = filtered.map((r, i) => {
+        let signals = [];
+        if (r.technical && r.technical.ma_alignment === 'bullish') signals.push('均线多头');
+        if (r.fund_flow && r.fund_flow.main_net_inflow_5d > 0) {
+            const v = r.fund_flow.main_net_inflow_5d;
+            signals.push(`主力净流入${Math.abs(v) >= 1e8 ? (v/1e8).toFixed(1)+'亿' : (v/1e4).toFixed(0)+'万'}`);
+        }
+        if (r.margin && r.margin.margin_balance_trend > 0) signals.push('融资增长');
+
+        return `<div class="stock-card" onclick="location.href='/detail/${r.symbol}'">
+            <div class="stock-rank">#${i+1}</div>
+            <div class="stock-header">
+                <span class="stock-code">${r.symbol}</span>
+                <span class="stock-name">${r.name}</span>
+                <span class="stock-industry">${r.industry || ''}</span>
+                <span class="stock-score">★${r.score.toFixed(0)}</span>
+                <span class="stock-return ${r.expected_return >= 0 ? 'positive' : 'negative'}">
+                    ${r.expected_return >= 0 ? '+' : ''}${r.expected_return.toFixed(1)}%
+                </span>
+                <span class="tag ${riskClass[r.risk_level]}">${riskMap[r.risk_level]}</span>
+            </div>
+            <div class="stock-tags">
+                <span class="tag ${recClass[r.recommendation]}">${recMap[r.recommendation]}</span>
+                ${signals.map(s => `<span class="tag tag-signal">${s}</span>`).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+</script>
+{% endblock %}

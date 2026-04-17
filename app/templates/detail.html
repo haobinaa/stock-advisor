@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+{% block title %}{{ symbol }} - Kronos Stock Advisor{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.27.0/plotly.min.js"></script>
+{% endblock %}
+{% block content %}
+<div class="page-header">
+    <a href="javascript:history.back()" class="back-link">&larr; 返回</a>
+    <h1 id="stock-title">{{ symbol }}</h1>
+    <div id="header-tags" class="stock-tags"></div>
+</div>
+
+<div id="loading-detail" class="loading">
+    <div class="spinner"></div>
+    <span>正在分析 {{ symbol }}...</span>
+</div>
+
+<div id="detail-content" class="hidden">
+    <!-- Chart -->
+    <div class="card">
+        <h2>预测走势</h2>
+        <div id="price-chart" style="width:100%;height:400px"></div>
+    </div>
+
+    <!-- Score radar -->
+    <div class="detail-grid">
+        <div class="card">
+            <h2>评分雷达</h2>
+            <div id="radar-chart" style="width:100%;height:350px"></div>
+        </div>
+        <div class="card">
+            <h2>核心数据</h2>
+            <table id="core-data-table" class="data-table">
+            </table>
+        </div>
+    </div>
+
+    <!-- Analysis summary -->
+    <div class="card">
+        <h2>分析摘要</h2>
+        <div id="analysis-summary" class="summary-content"></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="card actions-bar">
+        <button id="add-watchlist-btn" class="btn btn-primary">添加到自选股</button>
+        <button id="refresh-btn" class="btn btn-secondary">刷新预测</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const symbol = '{{ symbol }}';
+let analysisData = null;
+
+async function loadAnalysis() {
+    try {
+        const resp = await fetch(`/api/analyze/${symbol}`);
+        if (!resp.ok) {
+            const err = await resp.json();
+            throw new Error(err.error || 'Analysis failed');
+        }
+        analysisData = await resp.json();
+        renderDetail();
+    } catch (e) {
+        document.getElementById('loading-detail').innerHTML =
+            `<div class="error">分析失败: ${e.message}</div>`;
+    }
+}
+
+function renderDetail() {
+    const a = analysisData;
+    document.getElementById('loading-detail').classList.add('hidden');
+    document.getElementById('detail-content').classList.remove('hidden');
+
+    // Title
+    document.getElementById('stock-title').textContent = `${a.name} (${a.symbol})`;
+
+    // Tags
+    const recMap = {strong_buy:'强烈买入', buy:'买入', hold:'持有观望', avoid:'建议回避'};
+    const riskMap = {low:'低风险', medium:'中风险', high:'高风险'};
+    const riskClass = {low:'risk-low', medium:'risk-medium', high:'risk-high'};
+    const recClass = {strong_buy:'rec-strong-buy', buy:'rec-buy', hold:'rec-hold', avoid:'rec-avoid'};
+
+    document.getElementById('header-tags').innerHTML = `
+        <span class="tag ${riskClass[a.risk_level]}">${riskMap[a.risk_level]}</span>
+        <span class="tag ${recClass[a.recommendation]}">${recMap[a.recommendation]}</span>
+        <span class="stock-score large">★${a.score.toFixed(0)}</span>
+    `;
+
+    // Price chart
+    renderPriceChart(a);
+
+    // Radar chart
+    renderRadarChart(a);
+
+    // Core data table
+    renderCoreData(a);
+
+    // Summary
+    const summaryHtml = a.summary.replace(/\n/g, '<br>').replace(/##\s*/g, '<strong>').replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    document.getElementById('analysis-summary').innerHTML = summaryHtml;
+}
+
+function renderPriceChart(a) {
+    const traces = [];
+
+    // Historical
+    if (a.hist_dates && a.hist_prices) {
+        traces.push({
+            x: a.hist_dates,
+            y: a.hist_prices,
+            name: '历史价格',
+            type: 'scatter',
+            mode: 'lines',
+            line: {color: '#2196F3', width: 2}
+        });
+    }
+
+    // Predicted mean
+    if (a.pred_prices && a.pred_prices.length) {
+        const lastDate = a.hist_dates ? a.hist_dates[a.hist_dates.length - 1] : '';
+        const predDates = a.pred_prices.map((_, i) => {
+            const d = new Date(lastDate);
+            d.setDate(d.getDate() + i + 1);
+            // Skip weekends
+            while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+            return d.toISOString().split('T')[0];
+        });
+
+        traces.push({
+            x: predDates,
+            y: a.pred_prices,
+            name: '预测价格',
+            type: 'scatter',
+            mode: 'lines',
+            line: {color: '#F44336', width: 2, dash: 'dash'}
+        });
+
+        // Uncertainty band
+        if (a.pred_std && a.pred_std.length) {
+            const upper = a.pred_prices.map((p, i) => p + a.pred_std[i] * 1.96);
+            const lower = a.pred_prices.map((p, i) => p - a.pred_std[i] * 1.96);
+            traces.push({
+                x: predDates.concat(predDates.slice().reverse()),
+                y: upper.concat(lower.reverse()),
+                fill: 'toself',
+                fillcolor: 'rgba(244,67,54,0.1)',
+                line: {color: 'transparent'},
+                name: '95%置信区间',
+                showlegend: true,
+                type: 'scatter'
+            });
+        }
+
+        // Support/Resistance lines
+        if (a.technical) {
+            const allDates = (a.hist_dates || []).concat(predDates);
+            if (a.technical.support_level > 0) {
+                traces.push({
+                    x: [allDates[0], allDates[allDates.length-1]],
+                    y: [a.technical.support_level, a.technical.support_level],
+                    name: `支撑位 ${a.technical.support_level.toFixed(2)}`,
+                    type: 'scatter', mode: 'lines',
+                    line: {color: '#4CAF50', width: 1, dash: 'dot'}
+                });
+            }
+            if (a.technical.resistance_level > 0) {
+                traces.push({
+                    x: [allDates[0], allDates[allDates.length-1]],
+                    y: [a.technical.resistance_level, a.technical.resistance_level],
+                    name: `压力位 ${a.technical.resistance_level.toFixed(2)}`,
+                    type: 'scatter', mode: 'lines',
+                    line: {color: '#FF9800', width: 1, dash: 'dot'}
+                });
+            }
+        }
+    }
+
+    Plotly.newPlot('price-chart', traces, {
+        title: '',
+        xaxis: {title: ''},
+        yaxis: {title: '价格'},
+        legend: {orientation: 'h', y: -0.15},
+        margin: {t: 20, b: 60, l: 60, r: 20},
+        hovermode: 'x unified'
+    }, {responsive: true});
+}
+
+function renderRadarChart(a) {
+    const categories = ['预期收益', '回撤控制', '确定性', '技术面', '资金面', '融资趋势'];
+
+    // Normalize scores to 0-100 for radar
+    const retScore = Math.min(100, Math.max(0, a.expected_return * 5 + 50));
+    const ddScore = Math.min(100, Math.max(0, 100 - a.max_drawdown * 5));
+    const uncScore = Math.min(100, Math.max(0, 100 - a.uncertainty * 5));
+    const techScore = a.technical ? a.technical.technical_score : 50;
+    const ffScore = a.fund_flow ? a.fund_flow.fund_flow_score : 50;
+    const mgScore = a.margin ? a.margin.margin_score : 50;
+
+    const values = [retScore, ddScore, uncScore, techScore, ffScore, mgScore];
+
+    Plotly.newPlot('radar-chart', [{
+        type: 'scatterpolar',
+        r: values.concat([values[0]]),
+        theta: categories.concat([categories[0]]),
+        fill: 'toself',
+        fillcolor: 'rgba(33,150,243,0.2)',
+        line: {color: '#2196F3'}
+    }], {
+        polar: {radialaxis: {visible: true, range: [0, 100]}},
+        margin: {t: 20, b: 20, l: 60, r: 60},
+        showlegend: false
+    }, {responsive: true});
+}
+
+function renderCoreData(a) {
+    const rows = [
+        ['当前价', `${a.current_price.toFixed(2)}`],
+        ['涨跌幅', `<span class="${a.change_pct >= 0 ? 'positive' : 'negative'}">${a.change_pct >= 0 ? '+' : ''}${a.change_pct.toFixed(2)}%</span>`],
+        ['预期收益', `<span class="${a.expected_return >= 0 ? 'positive' : 'negative'}">${a.expected_return >= 0 ? '+' : ''}${a.expected_return.toFixed(1)}%</span>`],
+        ['最大回撤', `${a.max_drawdown.toFixed(1)}%`],
+        ['不确定性', `${a.uncertainty.toFixed(1)}%`],
+        ['所属行业', a.industry || '-'],
+        ['综合评分', `★${a.score.toFixed(0)}`],
+    ];
+
+    if (a.technical) {
+        const maMap = {bullish:'多头排列', bearish:'空头排列', neutral:'中性'};
+        rows.push(['均线状态', maMap[a.technical.ma_alignment] || '-']);
+        rows.push(['支撑位', a.technical.support_level.toFixed(2)]);
+        rows.push(['压力位', a.technical.resistance_level.toFixed(2)]);
+    }
+
+    if (a.fund_flow) {
+        const v = a.fund_flow.main_net_inflow_5d;
+        const text = Math.abs(v) >= 1e8 ? `${(v/1e8).toFixed(1)}亿` : `${(v/1e4).toFixed(0)}万`;
+        rows.push(['5日主力净流入', `<span class="${v >= 0 ? 'positive' : 'negative'}">${v >= 0 ? '+' : ''}${text}</span>`]);
+    }
+
+    if (a.margin) {
+        rows.push(['融资余额趋势', `${a.margin.margin_balance_trend >= 0 ? '+' : ''}${a.margin.margin_balance_trend.toFixed(1)}%`]);
+    }
+
+    document.getElementById('core-data-table').innerHTML = rows.map(([k, v]) =>
+        `<tr><td class="label">${k}</td><td class="value">${v}</td></tr>`
+    ).join('');
+}
+
+// Actions
+document.getElementById('add-watchlist-btn').addEventListener('click', async () => {
+    try {
+        const resp = await fetch('/api/watchlist', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({symbol})
+        });
+        if (resp.ok) {
+            alert('已添加到自选股');
+        } else {
+            const err = await resp.json();
+            alert(err.error || '添加失败');
+        }
+    } catch (e) { alert('添加失败'); }
+});
+
+document.getElementById('refresh-btn').addEventListener('click', () => {
+    document.getElementById('detail-content').classList.add('hidden');
+    document.getElementById('loading-detail').classList.remove('hidden');
+    document.getElementById('loading-detail').innerHTML = '<div class="spinner"></div><span>正在重新分析...</span>';
+    loadAnalysis();
+});
+
+// Init
+loadAnalysis();
+</script>
+{% endblock %}
