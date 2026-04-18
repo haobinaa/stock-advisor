@@ -133,7 +133,20 @@ function renderResults() {
     });
 
     if (!filtered.length) {
-        scanResults.innerHTML = '<div class="empty-state"><p>暂无符合条件的推荐</p></div>';
+        scanResults.innerHTML = `<div class="empty-state">
+            <p>暂无符合条件的推荐</p>
+            <div class="filter-rules">
+                <p><strong>筛选规则：</strong></p>
+                <ul>
+                    <li>数据来源：沪深300 + 中证500 成分股（约800只）</li>
+                    <li>Kronos 模型预测未来 40 个交易日走势</li>
+                    <li>风险筛选：当前选择「${riskFilter === 'all' ? '全部' : riskFilter === 'low' ? '低风险' : '中风险'}」</li>
+                    <li>收益率筛选：预期收益 > ${returnFilter}%</li>
+                    <li>综合评分基于预期收益、最大回撤、不确定性、技术面、资金面、融资融券六个维度</li>
+                </ul>
+                <p class="hint">提示：可尝试降低收益率门槛或选择「全部」风险等级</p>
+            </div>
+        </div>`;
         return;
     }
 

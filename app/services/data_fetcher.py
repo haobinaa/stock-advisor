@@ -66,6 +66,11 @@ class DataFetcher:
             return "sh"
         return "sz"
 
+    @staticmethod
+    def _is_hk(symbol: str) -> bool:
+        """Check if a symbol is a HK stock (5-digit code like 01810, 00700)."""
+        return len(symbol) == 5 and symbol.isdigit()
+
     # ── Public API ─────────────────────────────────────────────────
 
     def get_stock_history(
@@ -86,10 +91,13 @@ class DataFetcher:
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=int(lookback * 1.8))).strftime("%Y%m%d")
 
-        df = self._fetch_hist_eastmoney(symbol, start_date, end_date)
-        if df is None or df.empty:
-            logger.info("Eastmoney failed for %s, trying sina fallback", symbol)
-            df = self._fetch_hist_sina(symbol, start_date, end_date)
+        if self._is_hk(symbol):
+            df = self._fetch_hist_hk(symbol)
+        else:
+            df = self._fetch_hist_eastmoney(symbol, start_date, end_date)
+            if df is None or df.empty:
+                logger.info("Eastmoney failed for %s, trying sina fallback", symbol)
+                df = self._fetch_hist_sina(symbol, start_date, end_date)
 
         if df is None or df.empty:
             logger.warning("No history data for %s from any source", symbol)
@@ -171,6 +179,21 @@ class DataFetcher:
             logger.warning("Sina fallback failed for %s: %s", symbol, e)
             return None
 
+    def _fetch_hist_hk(
+        self, symbol: str
+    ) -> Optional[pd.DataFrame]:
+        """Fetch HK stock history from sina via stock_hk_daily."""
+        try:
+            df = ak.stock_hk_daily(symbol=symbol, adjust="")
+            if df is None or df.empty:
+                return None
+            # Columns are already: date, open, high, low, close, volume, amount
+            keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+            return df[keep]
+        except Exception as e:
+            logger.warning("HK hist fetch failed for %s: %s", symbol, e)
+            return None
+
     def get_stock_realtime(self, symbol: str) -> Optional[Dict]:
         """Get latest quote for a stock (from recent history as fallback)."""
         try:
@@ -225,9 +248,12 @@ class DataFetcher:
         except Exception as e:
             logger.warning("Eastmoney info failed for %s: %s", symbol, e)
 
-        # Fallback: get name from code-name list if missing
+        # Fallback: get name from code-name list (A-share) or HK list
         if not info.get("name"):
-            name = self._lookup_name_from_list(symbol)
+            if self._is_hk(symbol):
+                name = self._lookup_name_from_hk_list(symbol)
+            else:
+                name = self._lookup_name_from_list(symbol)
             if name:
                 info["name"] = name
 
@@ -242,14 +268,7 @@ class DataFetcher:
     def _lookup_name_from_list(self, symbol: str) -> Optional[str]:
         """Lookup stock name from the cached code-name list."""
         try:
-            cache_key = "stock_code_name_list"
-            code_name_list = self._get_cache(cache_key, max_age_hours=24)
-            if code_name_list is None:
-                df = ak.stock_info_a_code_name()
-                if df is not None and not df.empty:
-                    code_name_list = df.to_dict(orient="records")
-                    self._set_cache(cache_key, code_name_list)
-
+            code_name_list = self._get_a_share_list()
             if code_name_list:
                 for item in code_name_list:
                     if str(item.get("code", "")) == symbol:
@@ -258,39 +277,86 @@ class DataFetcher:
             logger.warning("Code-name lookup failed for %s: %s", symbol, e)
         return None
 
+    def _lookup_name_from_hk_list(self, symbol: str) -> Optional[str]:
+        """Lookup HK stock name from cached HK list."""
+        try:
+            hk_list = self._get_cache("hk_code_name_list", max_age_hours=24)
+            if hk_list:
+                for item in hk_list:
+                    if str(item.get("code", "")) == symbol:
+                        return str(item.get("name", ""))
+        except Exception as e:
+            logger.warning("HK name lookup failed for %s: %s", symbol, e)
+        return None
+
     def search_stock(self, keyword: str) -> List[Dict]:
-        """Search stocks by code or name.
-
-        Uses stock_info_a_code_name to get code/name pairs (lightweight),
-        then enriches matched results with price from history.
-        """
-        cache_key = "stock_code_name_list"
-        cached = self._get_cache(cache_key, max_age_hours=24)
-
-        if cached is not None:
-            code_name_list = cached
-        else:
-            try:
-                df = ak.stock_info_a_code_name()
-                if df is None or df.empty:
-                    return []
-                code_name_list = df.to_dict(orient="records")
-                self._set_cache(cache_key, code_name_list)
-            except Exception as e:
-                logger.error("Failed to fetch code-name list: %s", e)
-                return []
-
-        # Filter by keyword (match code or name)
+        """Search stocks by code or name (A-share + HK via港股通)."""
         results = []
-        for item in code_name_list:
+
+        # A-share search
+        a_list = self._get_a_share_list()
+        for item in a_list:
             code = str(item.get("code", ""))
             name = str(item.get("name", ""))
             if keyword in code or keyword in name:
-                results.append({"symbol": code, "name": name, "price": ""})
-            if len(results) >= 20:
+                results.append({"symbol": code, "name": name, "price": "", "market": "a_share"})
+            if len(results) >= 15:
                 break
 
+        # HK search — only if HK list is already cached (avoid blocking)
+        hk_list = self._get_cache("hk_code_name_list", max_age_hours=24)
+        if hk_list:
+            for item in hk_list:
+                code = str(item.get("code", ""))
+                name = str(item.get("name", ""))
+                if keyword in code or keyword in name:
+                    results.append({"symbol": code, "name": name, "price": "", "market": "hk"})
+                if len(results) >= 20:
+                    break
+
         return results
+
+    def preload_hk_list(self):
+        """Pre-load HK stock list in background (call once at startup)."""
+        self._get_hk_list()
+
+    def _get_a_share_list(self) -> list:
+        """Get A-share code-name list (cached)."""
+        cache_key = "stock_code_name_list"
+        cached = self._get_cache(cache_key, max_age_hours=24)
+        if cached is not None:
+            return cached
+        try:
+            df = ak.stock_info_a_code_name()
+            if df is None or df.empty:
+                return []
+            code_name_list = df.to_dict(orient="records")
+            self._set_cache(cache_key, code_name_list)
+            return code_name_list
+        except Exception as e:
+            logger.error("Failed to fetch A-share code-name list: %s", e)
+            return []
+
+    def _get_hk_list(self) -> list:
+        """Get HK stock code-name list via sina (cached)."""
+        cache_key = "hk_code_name_list"
+        cached = self._get_cache(cache_key, max_age_hours=24)
+        if cached is not None:
+            return cached
+        try:
+            df = ak.stock_hk_spot()
+            if df is None or df.empty:
+                return []
+            hk_list = []
+            code_col = "代码" if "代码" in df.columns else df.columns[1]
+            name_col = "中文名称" if "中文名称" in df.columns else df.columns[2]
+            for _, row in df.iterrows():
+                hk_list.append({"code": str(row[code_col]), "name": str(row[name_col])})
+            self._set_cache(cache_key, hk_list)
+            return hk_list
+        except Exception as e:
+            logger.warning("Failed to fetch HK stock list: %s", e)
+            return []
 
     def get_index_components(self, index: str = "hs300") -> List[str]:
         """Get constituent stock codes of a major index."""
@@ -337,11 +403,24 @@ class DataFetcher:
         if cached is not None:
             return cached
 
+        if self._is_hk(symbol):
+            return None
+
         market = self._get_market(symbol)
         try:
             df = ak.stock_individual_fund_flow(stock=symbol, market=market)
             if df is None or df.empty:
                 return None
+
+            # Normalize column names
+            col_map = {}
+            for c in df.columns:
+                cs = str(c)
+                if "主力净流入" in cs and "净额" in cs:
+                    col_map[c] = "main_net_inflow"
+                elif "日期" in cs:
+                    col_map[c] = "date"
+            df = df.rename(columns=col_map)
 
             df = df.tail(days).reset_index(drop=True)
             self._set_cache(cache_key, df)
@@ -351,22 +430,72 @@ class DataFetcher:
             return None
 
     def get_margin_data(self, symbol: str, days: int = 20) -> Optional[pd.DataFrame]:
-        """Get margin trading (融资融券) data."""
+        """Get margin trading (融资融券) data.
+
+        Tries stock_margin_detail_sse for SH, stock_margin_detail_szse for SZ.
+        These APIs query by date, so we fetch recent dates and filter by symbol.
+        """
         cache_key = f"margin_{symbol}_{days}"
         cached = self._get_cache(cache_key, max_age_hours=2)
         if cached is not None:
             return cached
 
+        if self._is_hk(symbol):
+            return None
+
+        market = self._get_market(symbol)
         try:
-            df = ak.stock_margin_detail_info(symbol=symbol)
-            if df is None or df.empty:
+            from datetime import date as dt_date
+            import pandas as pd
+
+            rows = []
+            today = datetime.now()
+            # Try last N business days to collect enough data
+            for offset in range(days * 2):
+                d = today - timedelta(days=offset)
+                if d.weekday() >= 5:
+                    continue
+                date_str = d.strftime("%Y%m%d")
+                try:
+                    if market == "sh":
+                        day_df = ak.stock_margin_detail_sse(date=date_str)
+                    else:
+                        day_df = ak.stock_margin_detail_szse(date=date_str)
+                    if day_df is not None and not day_df.empty:
+                        # Filter for our symbol
+                        code_col = None
+                        for c in day_df.columns:
+                            if "代码" in str(c) or "标的" in str(c):
+                                code_col = c
+                                break
+                        if code_col is None:
+                            code_col = day_df.columns[0]
+                        matched = day_df[day_df[code_col].astype(str).str.contains(symbol)]
+                        if not matched.empty:
+                            row = matched.iloc[0].to_dict()
+                            row["_date"] = date_str
+                            rows.append(row)
+                except Exception:
+                    continue
+                if len(rows) >= days:
+                    break
+
+            if not rows:
                 return None
 
-            df = df.tail(days).reset_index(drop=True)
+            df = pd.DataFrame(rows)
+            # Normalize: find margin balance column
+            col_map = {"_date": "date"}
+            for c in df.columns:
+                cs = str(c)
+                if "融资余额" in cs and "融券" not in cs:
+                    col_map[c] = "margin_balance"
+            df = df.rename(columns=col_map)
+
             self._set_cache(cache_key, df)
             return df
         except Exception as e:
-            logger.error("Failed to fetch margin data for %s: %s", symbol, e)
+            logger.warning("Failed to fetch margin data for %s: %s", symbol, e)
             return None
 
     def get_stock_sector(self, symbol: str) -> Optional[Dict]:

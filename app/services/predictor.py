@@ -111,6 +111,7 @@ class StockPredictor:
         df: pd.DataFrame,
         pred_len: int = config.PRED_LEN,
         sample_count: int = config.SAMPLE_COUNT,
+        apply_price_limit: bool = True,
     ) -> dict:
         """Predict future prices for a single stock.
 
@@ -160,7 +161,7 @@ class StockPredictor:
                 top_p=config.TOP_P,
                 sample_count=1,
             )
-            pred_df = self._apply_price_limit(pred_df, last_close)
+            pred_df = self._apply_price_limit(pred_df, last_close) if apply_price_limit else pred_df
             predictions.append(pred_df)
 
         all_values = np.stack([p.values for p in predictions], axis=0)

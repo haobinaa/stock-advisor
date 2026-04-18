@@ -64,13 +64,14 @@ async function doSearch() {
             searchResults.innerHTML = '<div class="search-item">未找到结果</div>';
             return;
         }
-        searchResults.innerHTML = data.slice(0, 10).map(s =>
-            `<div class="search-item" onclick="addStock('${s.symbol}', '${s.name}')">
+        searchResults.innerHTML = data.slice(0, 10).map(s => {
+            const safeName = s.name.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+            return `<div class="search-item" onclick="addStock('${s.symbol}', '${safeName}')">
                 <span class="search-code">${s.symbol}</span>
                 <span class="search-name">${s.name}</span>
                 <span class="search-price">${s.price || ''}</span>
-            </div>`
-        ).join('');
+            </div>`;
+        }).join('');
     } catch (e) {
         searchResults.innerHTML = '<div class="search-item">搜索失败</div>';
     }
@@ -237,7 +238,7 @@ function renderList() {
         if (a.fund_flow && a.fund_flow.main_net_inflow_5d < 0) signals.push('资金流出');
         if (a.margin && a.margin.margin_balance_trend > 0) signals.push('融资增长');
 
-        return `<div class="stock-card" onclick="goDetail('${item.symbol}')">`
+        return `<div class="stock-card" onclick="goDetail('${item.symbol}')">
             <div class="stock-header">
                 <span class="stock-code">${item.symbol}</span>
                 <span class="stock-name">${a.name}</span>

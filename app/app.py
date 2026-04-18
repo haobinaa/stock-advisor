@@ -250,10 +250,12 @@ def api_analyze(symbol):
 
         # Kronos prediction
         predictor = get_predictor()
+        is_hk = len(symbol) == 5 and symbol.isdigit()
         pred_result = predictor.predict_single(
             df[["open", "high", "low", "close", "volume", "amount"]],
             pred_len=config.PRED_LEN,
             sample_count=config.SAMPLE_COUNT,
+            apply_price_limit=not is_hk,
         )
 
         # Technical analysis
@@ -488,6 +490,11 @@ def api_finetune_switch():
 if __name__ == "__main__":
     os.makedirs(config.CACHE_DIR, exist_ok=True)
     logger.info(f"Starting Kronos Stock Advisor on port {config.FLASK_PORT}")
+
+    # Pre-load HK stock list in background
+    import threading
+    threading.Thread(target=lambda: get_fetcher().preload_hk_list(), daemon=True).start()
+
     app.run(
         host=config.FLASK_HOST,
         port=config.FLASK_PORT,

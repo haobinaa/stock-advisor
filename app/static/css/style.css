@@ -329,6 +329,9 @@ body {
 /* Empty state */
 .empty-state { text-align: center; padding: 60px 20px; color: var(--text-secondary); }
 .empty-state .hint { font-size: 13px; margin-top: 8px; }
+.filter-rules { text-align: left; max-width: 500px; margin: 16px auto 0; font-size: 13px; }
+.filter-rules ul { margin: 8px 0; padding-left: 20px; }
+.filter-rules li { margin: 4px 0; }
 .error { color: var(--danger); text-align: center; padding: 40px; }
 
 /* Hidden */
