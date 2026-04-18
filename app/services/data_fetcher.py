@@ -73,6 +73,8 @@ class DataFetcher:
     ) -> Optional[pd.DataFrame]:
         """Get daily OHLCV history for an A-share stock.
 
+        Tries eastmoney (stock_zh_a_hist) first, falls back to sina (stock_zh_a_daily).
+
         Returns DataFrame with columns:
             [date, open, high, low, close, volume, amount]
         """
@@ -81,47 +83,92 @@ class DataFetcher:
         if cached is not None:
             return cached
 
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=int(lookback * 1.8))).strftime("%Y%m%d")
+
+        df = self._fetch_hist_eastmoney(symbol, start_date, end_date)
+        if df is None or df.empty:
+            logger.info("Eastmoney failed for %s, trying sina fallback", symbol)
+            df = self._fetch_hist_sina(symbol, start_date, end_date)
+
+        if df is None or df.empty:
+            logger.warning("No history data for %s from any source", symbol)
+            return None
+
+        df = df.tail(lookback).reset_index(drop=True)
+        self._set_cache(cache_key, df)
+        return df
+
+    def _fetch_hist_eastmoney(
+        self, symbol: str, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """Fetch from eastmoney via stock_zh_a_hist."""
+        df = None
+        for attempt in range(3):
+            try:
+                df = ak.stock_zh_a_hist(
+                    symbol=symbol,
+                    period="daily",
+                    start_date=start_date,
+                    end_date=end_date,
+                    adjust="",
+                )
+                if df is not None and not df.empty:
+                    break
+            except Exception as e:
+                logger.warning("Eastmoney attempt %d failed for %s: %s", attempt + 1, symbol, e)
+                time.sleep(1.5 * (attempt + 1))
+
+        if df is None or df.empty:
+            return None
+
+        col_map = {
+            "日期": "date", "开盘": "open", "最高": "high",
+            "最低": "low", "收盘": "close", "成交量": "volume", "成交额": "amount",
+        }
+        df = df.rename(columns=col_map)
+        keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+        return df[keep]
+
+    def _fetch_hist_sina(
+        self, symbol: str, start_date: str, end_date: str
+    ) -> Optional[pd.DataFrame]:
+        """Fetch from sina via stock_zh_a_daily (fallback)."""
+        market = self._get_market(symbol)
+        sina_symbol = f"{'sh' if market == 'sh' else 'sz'}{symbol}"
         try:
-            end_date = datetime.now().strftime("%Y%m%d")
-            start_date = (datetime.now() - timedelta(days=int(lookback * 1.8))).strftime("%Y%m%d")
-
-            df = None
-            for attempt in range(3):
-                try:
-                    df = ak.stock_zh_a_hist(
-                        symbol=symbol,
-                        period="daily",
-                        start_date=start_date,
-                        end_date=end_date,
-                        adjust="",
-                    )
-                    if df is not None and not df.empty:
-                        break
-                except Exception as e:
-                    logger.warning("Attempt %d failed for %s: %s", attempt + 1, symbol, e)
-                    time.sleep(1.5)
-
+            df = ak.stock_zh_a_daily(
+                symbol=sina_symbol,
+                start_date=start_date,
+                end_date=end_date,
+                adjust="",
+            )
             if df is None or df.empty:
-                logger.warning("No history data for %s", symbol)
                 return None
 
-            col_map = {
-                "日期": "date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
-                "成交额": "amount",
-            }
+            col_map = {}
+            for col in df.columns:
+                cl = str(col).lower()
+                if cl == "date":
+                    col_map[col] = "date"
+                elif cl == "open":
+                    col_map[col] = "open"
+                elif cl == "high":
+                    col_map[col] = "high"
+                elif cl == "low":
+                    col_map[col] = "low"
+                elif cl == "close":
+                    col_map[col] = "close"
+                elif cl == "volume":
+                    col_map[col] = "volume"
+                elif cl == "amount":
+                    col_map[col] = "amount"
+
             df = df.rename(columns=col_map)
             keep = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
-            df = df[keep].tail(lookback).reset_index(drop=True)
-
-            self._set_cache(cache_key, df)
-            return df
+            return df[keep]
         except Exception as e:
-            logger.error("Failed to fetch history for %s: %s", symbol, e)
+            logger.warning("Sina fallback failed for %s: %s", symbol, e)
             return None
 
     def get_stock_realtime(self, symbol: str) -> Optional[Dict]:
@@ -149,37 +196,67 @@ class DataFetcher:
             return None
 
     def get_stock_info(self, symbol: str) -> Optional[Dict]:
-        """Get basic stock info (name, industry)."""
+        """Get basic stock info (name, industry).
+
+        Tries eastmoney individual_info first, falls back to code-name list.
+        """
         cache_key = f"info_{symbol}"
         cached = self._get_cache(cache_key, max_age_hours=24)
         if cached is not None:
             return cached
 
+        info = {}
+
+        # Primary: eastmoney detailed info
         try:
             df = ak.stock_individual_info_em(symbol=symbol)
-            if df is None or df.empty:
-                return None
-
-            info = {}
-            for _, row in df.iterrows():
-                key = str(row.iloc[0])
-                val = str(row.iloc[1])
-                if "名称" in key or "股票简称" in key:
-                    info["name"] = val
-                elif "行业" in key:
-                    info["industry"] = val
-                elif "上市日期" in key or "上市时间" in key:
-                    info["list_date"] = val
-                elif "总市值" in key:
-                    info["market_cap"] = val
-
-            info.setdefault("name", "")
-            info.setdefault("industry", "")
-            self._set_cache(cache_key, info)
-            return info
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    key = str(row.iloc[0])
+                    val = str(row.iloc[1])
+                    if "名称" in key or "股票简称" in key:
+                        info["name"] = val
+                    elif "行业" in key:
+                        info["industry"] = val
+                    elif "上市日期" in key or "上市时间" in key:
+                        info["list_date"] = val
+                    elif "总市值" in key:
+                        info["market_cap"] = val
         except Exception as e:
-            logger.error("Failed to fetch info for %s: %s", symbol, e)
-            return None
+            logger.warning("Eastmoney info failed for %s: %s", symbol, e)
+
+        # Fallback: get name from code-name list if missing
+        if not info.get("name"):
+            name = self._lookup_name_from_list(symbol)
+            if name:
+                info["name"] = name
+
+        info.setdefault("name", "")
+        info.setdefault("industry", "")
+
+        if info.get("name"):
+            self._set_cache(cache_key, info)
+
+        return info
+
+    def _lookup_name_from_list(self, symbol: str) -> Optional[str]:
+        """Lookup stock name from the cached code-name list."""
+        try:
+            cache_key = "stock_code_name_list"
+            code_name_list = self._get_cache(cache_key, max_age_hours=24)
+            if code_name_list is None:
+                df = ak.stock_info_a_code_name()
+                if df is not None and not df.empty:
+                    code_name_list = df.to_dict(orient="records")
+                    self._set_cache(cache_key, code_name_list)
+
+            if code_name_list:
+                for item in code_name_list:
+                    if str(item.get("code", "")) == symbol:
+                        return str(item.get("name", ""))
+        except Exception as e:
+            logger.warning("Code-name lookup failed for %s: %s", symbol, e)
+        return None
 
     def search_stock(self, keyword: str) -> List[Dict]:
         """Search stocks by code or name.

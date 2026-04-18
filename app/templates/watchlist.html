@@ -41,7 +41,8 @@ const loadingIndicator = document.getElementById('loading-indicator');
 const refreshAllBtn = document.getElementById('refresh-all-btn');
 
 let watchlistData = [];
-let analysisCache = {};
+let analysisCache = {};  // { symbol: { data, analyzedAt, error } }
+let analyzingSet = new Set();  // symbols currently being analyzed
 let currentSort = 'score';
 
 // Search
@@ -82,7 +83,7 @@ async function addStock(symbol, name) {
         const resp = await fetch('/api/watchlist', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({symbol})
+            body: JSON.stringify({symbol, name})
         });
         if (resp.ok) {
             loadWatchlist();
@@ -112,61 +113,122 @@ async function loadWatchlist() {
     }
     emptyState.classList.add('hidden');
     renderList();
-    analyzeAll();
+}
+
+async function analyzeSingle(symbol) {
+    if (analyzingSet.has(symbol)) return;
+    analyzingSet.add(symbol);
+    renderList();
+    try {
+        const resp = await fetch(`/api/analyze/${symbol}`);
+        const body = await resp.json();
+        if (resp.ok) {
+            analysisCache[symbol] = {
+                data: body,
+                analyzedAt: new Date(),
+                error: null
+            };
+        } else {
+            analysisCache[symbol] = {
+                data: null,
+                analyzedAt: new Date(),
+                error: body.error || '分析失败'
+            };
+        }
+    } catch (e) {
+        console.error(`Analysis failed for ${symbol}:`, e);
+        analysisCache[symbol] = {
+            data: null,
+            analyzedAt: new Date(),
+            error: '网络错误'
+        };
+    } finally {
+        analyzingSet.delete(symbol);
+        renderList();
+    }
 }
 
 async function analyzeAll() {
     loadingIndicator.classList.remove('hidden');
-    const symbols = watchlistData.map(w => w.symbol).filter(s => !analysisCache[s]);
+    const symbols = watchlistData.map(w => w.symbol);
     for (const sym of symbols) {
-        try {
-            const resp = await fetch(`/api/analyze/${sym}`);
-            if (resp.ok) {
-                analysisCache[sym] = await resp.json();
-                renderList();
-            }
-        } catch (e) {
-            console.error(`Analysis failed for ${sym}:`, e);
-        }
+        await analyzeSingle(sym);
     }
     loadingIndicator.classList.add('hidden');
+}
+
+function formatTime(date) {
+    if (!date) return '';
+    const d = date instanceof Date ? date : new Date(date);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${d.getMonth()+1}/${d.getDate()} ${hh}:${mm}:${ss}`;
 }
 
 function renderList() {
     let items = watchlistData.map(w => ({
         ...w,
-        analysis: analysisCache[w.symbol] || null
+        cached: analysisCache[w.symbol] || null,
+        analyzing: analyzingSet.has(w.symbol)
     }));
 
-    // Sort
+    // Sort: analyzed items first, then by chosen metric
     items.sort((a, b) => {
-        if (!a.analysis && !b.analysis) return 0;
-        if (!a.analysis) return 1;
-        if (!b.analysis) return -1;
-        if (currentSort === 'score') return b.analysis.score - a.analysis.score;
-        if (currentSort === 'expected_return') return b.analysis.expected_return - a.analysis.expected_return;
+        const ad = a.cached ? a.cached.data : null;
+        const bd = b.cached ? b.cached.data : null;
+        if (!ad && !bd) return 0;
+        if (!ad) return 1;
+        if (!bd) return -1;
+        if (currentSort === 'score') return bd.score - ad.score;
+        if (currentSort === 'expected_return') return bd.expected_return - ad.expected_return;
         if (currentSort === 'risk_level') {
             const riskOrder = {low: 0, medium: 1, high: 2};
-            return (riskOrder[a.analysis.risk_level] || 1) - (riskOrder[b.analysis.risk_level] || 1);
+            return (riskOrder[ad.risk_level] || 1) - (riskOrder[bd.risk_level] || 1);
         }
         return 0;
     });
 
     stockList.innerHTML = items.map(item => {
-        const a = item.analysis;
-        if (!a) {
-            return `<div class="stock-card loading-card">
-                <div class="stock-header">
-                    <span class="stock-code">${item.symbol}</span>
-                    <span class="stock-name">${item.name}</span>
-                    <span class="analyzing">分析中...</span>
-                </div>
-            </div>`;
-        }
+        const a = item.cached ? item.cached.data : null;
+        const analyzedAt = item.cached ? item.cached.analyzedAt : null;
+        const isAnalyzing = item.analyzing;
+
         const recMap = {strong_buy:'强烈买入', buy:'买入', hold:'持有观望', avoid:'建议回避'};
         const riskMap = {low:'低风险', medium:'中风险', high:'高风险'};
         const riskClass = {low:'risk-low', medium:'risk-medium', high:'risk-high'};
         const recClass = {strong_buy:'rec-strong-buy', buy:'rec-buy', hold:'rec-hold', avoid:'rec-avoid'};
+
+        // Analyze button
+        const analyzeBtn = isAnalyzing
+            ? `<button class="btn btn-sm btn-analyzing" disabled><span class="spinner-inline"></span>分析中</button>`
+            : `<button class="btn btn-sm btn-primary btn-analyze" onclick="event.stopPropagation(); analyzeSingle('${item.symbol}')">分析</button>`;
+
+        // Time label
+        const errorMsg = item.cached ? item.cached.error : null;
+        const timeLabel = analyzedAt
+            ? (errorMsg
+                ? `<span class="analyzed-time analyze-error" title="${errorMsg}">分析失败</span>`
+                : `<span class="analyzed-time" title="最近分析时间">${formatTime(analyzedAt)}</span>`)
+            : `<span class="analyzed-time not-analyzed">未分析</span>`;
+
+        if (!a) {
+            const errorLine = errorMsg
+                ? `<div class="stock-error-msg">${errorMsg}</div>`
+                : '';
+            return `<div class="stock-card">
+                <div class="stock-header">
+                    <span class="stock-code">${item.symbol}</span>
+                    <span class="stock-name">${item.name}</span>
+                    <span class="stock-header-right">
+                        ${timeLabel}
+                        ${analyzeBtn}
+                        <button class="btn-delete" onclick="event.stopPropagation(); removeStock('${item.symbol}')" title="删除">×</button>
+                    </span>
+                </div>
+                ${errorLine}
+            </div>`;
+        }
 
         let signals = [];
         if (a.technical && a.technical.ma_alignment === 'bullish') signals.push('均线多头');
@@ -175,7 +237,7 @@ function renderList() {
         if (a.fund_flow && a.fund_flow.main_net_inflow_5d < 0) signals.push('资金流出');
         if (a.margin && a.margin.margin_balance_trend > 0) signals.push('融资增长');
 
-        return `<div class="stock-card" onclick="location.href='/detail/${item.symbol}'">
+        return `<div class="stock-card" onclick="goDetail('${item.symbol}')">`
             <div class="stock-header">
                 <span class="stock-code">${item.symbol}</span>
                 <span class="stock-name">${a.name}</span>
@@ -185,7 +247,11 @@ function renderList() {
                     ${a.expected_return >= 0 ? '+' : ''}${a.expected_return.toFixed(1)}%
                 </span>
                 <span class="stock-score">★${a.score.toFixed(0)}</span>
-                <button class="btn-delete" onclick="event.stopPropagation(); removeStock('${item.symbol}')" title="删除">×</button>
+                <span class="stock-header-right">
+                    ${timeLabel}
+                    ${analyzeBtn}
+                    <button class="btn-delete" onclick="event.stopPropagation(); removeStock('${item.symbol}')" title="删除">×</button>
+                </span>
             </div>
             <div class="stock-tags">
                 <span class="tag ${riskClass[a.risk_level]}">${riskMap[a.risk_level]}</span>
@@ -219,7 +285,16 @@ document.addEventListener('click', e => {
     }
 });
 
-// Init
+// Navigate to detail, caching analysis data in sessionStorage
+function goDetail(symbol) {
+    const cached = analysisCache[symbol];
+    if (cached && cached.data) {
+        sessionStorage.setItem('analysis_' + symbol, JSON.stringify(cached.data));
+    }
+    location.href = '/detail/' + symbol;
+}
+
+// Init — only load list, no auto-analysis
 loadWatchlist();
 </script>
 {% endblock %}

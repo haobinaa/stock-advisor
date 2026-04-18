@@ -54,6 +54,20 @@
 const symbol = '{{ symbol }}';
 let analysisData = null;
 
+// Try cached data from watchlist page first
+const cachedJson = sessionStorage.getItem('analysis_' + symbol);
+if (cachedJson) {
+    sessionStorage.removeItem('analysis_' + symbol);
+    try {
+        analysisData = JSON.parse(cachedJson);
+        renderDetail();
+    } catch (e) {
+        loadAnalysis();
+    }
+} else {
+    loadAnalysis();
+}
+
 async function loadAnalysis() {
     try {
         const resp = await fetch(`/api/analyze/${symbol}`);
@@ -271,8 +285,5 @@ document.getElementById('refresh-btn').addEventListener('click', () => {
     document.getElementById('loading-detail').innerHTML = '<div class="spinner"></div><span>正在重新分析...</span>';
     loadAnalysis();
 });
-
-// Init
-loadAnalysis();
 </script>
 {% endblock %}

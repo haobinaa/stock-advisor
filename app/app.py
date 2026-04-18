@@ -195,9 +195,11 @@ def api_watchlist_add():
     if any(item["symbol"] == symbol for item in items):
         return jsonify({"error": "already in watchlist"}), 409
 
-    # Get stock info
-    info = get_fetcher().get_stock_info(symbol)
-    name = info.get("name", symbol) if info else symbol
+    # Prefer name from request, fallback to API lookup
+    name = data.get("name", "").strip()
+    if not name or name == symbol:
+        info = get_fetcher().get_stock_info(symbol)
+        name = info.get("name", symbol) if info else symbol
 
     market = "a_share"
     if symbol.startswith("HK") or len(symbol) == 5:
@@ -229,8 +231,10 @@ def api_analyze(symbol):
 
         # Get history
         df = fetcher.get_stock_history(symbol, lookback=config.LOOKBACK)
-        if df is None or len(df) < 100:
-            return jsonify({"error": f"Insufficient data for {symbol}"}), 400
+        if df is None:
+            return jsonify({"error": f"数据获取失败，请检查网络后重试"}), 502
+        if len(df) < 100:
+            return jsonify({"error": f"历史数据不足（需要100条，仅获取{len(df)}条）"}), 400
 
         # Basic info
         info = fetcher.get_stock_info(symbol)
@@ -323,7 +327,7 @@ def api_analyze(symbol):
 
     except Exception as e:
         logger.error(f"Analysis error for {symbol}: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"分析异常: {e}"}), 500
 
 
 @app.route("/api/analyze/batch", methods=["POST"])

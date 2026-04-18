@@ -128,6 +128,10 @@ class StockPredictor:
         """
         df = df.copy()
 
+        # Ensure input does not exceed max_context to prevent tensor size mismatch
+        if len(df) > config.MAX_CONTEXT:
+            df = df.tail(config.MAX_CONTEXT).reset_index(drop=True)
+
         # Extract date info and prepare timestamp series
         if "date" in df.columns:
             dates = pd.to_datetime(df["date"])

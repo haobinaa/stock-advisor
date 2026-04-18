@@ -4,5 +4,23 @@
     "name": "比亚迪",
     "market": "a_share",
     "added_at": "2026-04-17 16:11:31"
+  },
+  {
+    "symbol": "600036",
+    "name": "招商银行",
+    "market": "a_share",
+    "added_at": "2026-04-17 20:59:29"
+  },
+  {
+    "symbol": "600900",
+    "name": "长江电力",
+    "market": "a_share",
+    "added_at": "2026-04-17 20:59:43"
+  },
+  {
+    "symbol": "600085",
+    "name": "同仁堂",
+    "market": "a_share",
+    "added_at": "2026-04-17 21:00:17"
   }
 ]
